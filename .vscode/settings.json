@@ -1,0 +1,19 @@
+{
+  "editor.rulers": [100],
+  "files.trimTrailingWhitespace": true,
+  "files.insertFinalNewline": true,
+  "markdownlint.config": {
+    "default": true,
+    "MD013": false,
+    "MD024": {
+      "siblings_only": true
+    },
+    "MD033": false,
+    "MD041": false
+  },
+  "yaml.schemas": {
+    "./schemas/program-frontmatter.schema.json": "docs/programs/**/*.yml",
+    "./schemas/exec-plan-frontmatter.schema.json": "docs/exec-plans/**/*.yml"
+  }
+}
+

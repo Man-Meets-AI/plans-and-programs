@@ -1,0 +1,13 @@
+{
+  "name": "programs-execplans-starter",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Starter repo for teaching Program, ExecPlan, prompt, and agent skill loops.",
+  "scripts": {
+    "validate": "node scripts/validate.mjs",
+    "programs:lint": "node scripts/validate.mjs --programs",
+    "plans:lint": "node scripts/validate.mjs --plans"
+  }
+}
+
