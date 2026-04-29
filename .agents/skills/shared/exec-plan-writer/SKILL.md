@@ -20,9 +20,8 @@ Write one ExecPlan that a fresh agent can execute without chat history.
 3. Inspect the repo surfaces the plan will touch.
 4. Write exactly one plan using the required frontmatter and section order.
 5. Make the plan novice-readable and validation-focused.
-6. Run `npm run plans:lint` or the local equivalent before returning.
+6. Run `bun run plans:lint` or the local equivalent before returning.
 
 ## Prompt Asset
 
 Use `docs/prompts/exec-plan-writer.md` for the copy-paste prompt.
-

@@ -23,9 +23,8 @@ Refresh a Program after one child ExecPlan has landed.
 6. Write the next `planning-brief-N.md` if work remains.
 7. Update `current-planning-brief.txt`.
 8. Complete the Program only when no required slice remains and the retrospective is truthful.
-9. Run `npm run programs:lint` or the local equivalent before returning.
+9. Run `bun run programs:lint` or the local equivalent before returning.
 
 ## Prompt Asset
 
 Use `docs/prompts/program-planning-refresh.md` for the copy-paste prompt.
-

@@ -57,7 +57,7 @@ This repo is a docs-first teaching starter. The root README explains the primiti
 
 ### In Scope
 
-Seed the public starter with docs, templates, prompts, shared skills, a completed Program, a completed child ExecPlan, and no-dependency validation.
+Seed the public starter with docs, templates, prompts, shared skills, a completed Program, a completed child ExecPlan, and no-dependency Bun validation.
 
 ### Out Of Scope
 
@@ -75,7 +75,7 @@ The second milestone is contract shape. It is complete when Program and ExecPlan
 
 The third milestone is workflow reuse. It is complete when prompt assets and skill wrappers exist for writer, griller, execute, validate, and Program refresh.
 
-The fourth milestone is proof. It is complete when `npm run validate` checks the starter structure.
+The fourth milestone is proof. It is complete when `bun run validate` checks the starter structure.
 
 ## Concrete Steps
 
@@ -88,7 +88,9 @@ find . -maxdepth 3 -type f | sort
 Run validation:
 
 ```bash
-npm run validate
+bun run validate
+bun run lint
+bun run format:check
 ```
 
 To start a new initiative, copy:
@@ -109,9 +111,11 @@ The slice is accepted when all starter docs, templates, prompts, skills, and com
 Run these commands from the repo root:
 
 ```bash
-npm run validate
-npm run programs:lint
-npm run plans:lint
+bun run validate
+bun run programs:lint
+bun run plans:lint
+bun run lint
+bun run format:check
 ```
 
 ## Idempotence and Recovery
@@ -134,5 +138,4 @@ docs/exec-plans/completed/2026-04-29-seed-program-execplan-starter.md
 
 ## Interfaces and Dependencies
 
-The validation interface is `scripts/validate.mjs`, exposed through `package.json` scripts. The starter assumes Node is available and does not require third-party dependencies.
-
+The validation interface is `scripts/validate.mjs`, exposed through Bun-backed `package.json` scripts. The starter assumes Bun is available and uses `oxlint` plus `oxfmt` as development dependencies for linting and formatting.

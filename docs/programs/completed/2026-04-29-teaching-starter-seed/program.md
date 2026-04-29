@@ -5,7 +5,7 @@ status: complete
 created_at: 2026-04-29
 completed_at: 2026-04-29
 summary: Seed this repo as a public starter for Programs, ExecPlans, prompt loops, skills, and AGENTS routing.
-post_build_recap: The starter now includes root onboarding, Program and ExecPlan contracts, templates, prompt assets, shared skill wrappers, a completed seed ExecPlan, and a no-dependency validator.
+post_build_recap: The starter now includes root onboarding, Program and ExecPlan contracts, templates, prompt assets, shared skill wrappers, a completed seed ExecPlan, and a no-dependency Bun validator.
 read_when:
   - Understanding how this starter was assembled.
   - Copying the Program and ExecPlan pattern into another project.
@@ -49,7 +49,7 @@ The starter is seeded. Root onboarding, docs contracts, templates, prompts, skil
 - [x] 2026-04-29: Added prompt assets for the loop.
 - [x] 2026-04-29: Added shared skill wrappers.
 - [x] 2026-04-29: Added the completed seed child ExecPlan.
-- [x] 2026-04-29: Added no-dependency validation.
+- [x] 2026-04-29: Added no-dependency Bun validation.
 
 ## Decision Log
 
@@ -61,8 +61,8 @@ Decision: Use a completed Program as the worked example.
 Rationale: The fastest way to understand the lifecycle is to inspect a finished packet and its child ExecPlan.
 Date: 2026-04-29
 
-Decision: Use no-dependency validation.
-Rationale: A cloneable starter should work immediately with the local Node runtime.
+Decision: Use no-dependency Bun validation.
+Rationale: A cloneable starter should work immediately with the local Bun runtime.
 Date: 2026-04-29
 
 ## Slice Ledger
@@ -100,7 +100,7 @@ The Program is accepted when the starter contains the required docs, templates, 
 Validation command:
 
 ```bash
-npm run validate
+bun run validate
 ```
 
 ## Artifacts and Notes
@@ -117,5 +117,4 @@ Core starter files:
 
 ## Interfaces and Dependencies
 
-The starter depends on Node for `scripts/validate.mjs`. It has no package dependencies.
-
+The starter depends on Bun for `scripts/validate.mjs` and uses `oxlint` plus `oxfmt` as development dependencies for the local quality loop.

@@ -16,4 +16,3 @@
     "./schemas/exec-plan-frontmatter.schema.json": "docs/exec-plans/**/*.yml"
   }
 }
-

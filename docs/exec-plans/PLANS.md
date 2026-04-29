@@ -4,6 +4,8 @@ An ExecPlan is a self-contained Markdown plan that a fresh agent can follow to d
 
 The reader has the repository and this file. They do not have your chat history.
 
+Hat tip to OpenAI for the ExecPlans pattern and spec direction described in ["Harness engineering: leveraging Codex in an agent-first world"](https://openai.com/index/harness-engineering/). This starter adapts that idea into a small portable contract you can copy into your own repo.
+
 ## Storage
 
 Active plans live under:
@@ -103,4 +105,3 @@ Update these sections as work proceeds:
 - frontmatter
 
 If implementation changes the scope or sequence, update the ExecPlan first, then continue.
-

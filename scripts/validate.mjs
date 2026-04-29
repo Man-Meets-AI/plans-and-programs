@@ -9,7 +9,10 @@ const requiredFiles = [
   "AGENTS.md",
   "assets/plans-and-programs.png",
   "package.json",
+  "bun.lock",
   ".markdownlint.json",
+  ".oxlintrc.json",
+  ".oxfmtrc.json",
   ".vscode/extensions.json",
   ".vscode/settings.json",
   "schemas/program-frontmatter.schema.json",
@@ -218,7 +221,10 @@ function validatePlans() {
   assertSections(planPath, planRequiredSections);
   assertContains(planPath, "status: complete");
   assertContains(planPath, "program_id: teaching-starter-seed");
-  assertContains(planPath, "planning_brief: docs/programs/completed/2026-04-29-teaching-starter-seed/planning-brief-1.md");
+  assertContains(
+    planPath,
+    "planning_brief: docs/programs/completed/2026-04-29-teaching-starter-seed/planning-brief-1.md",
+  );
 }
 
 function validateMarkdownBasics() {

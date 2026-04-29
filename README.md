@@ -10,7 +10,7 @@ It is intentionally small. You can fork it, copy the folders into an existing pr
 
 This starter is based on the same core idea OpenAI describes in ["Harness engineering: leveraging Codex in an agent-first world"](https://openai.com/index/harness-engineering/): the repo needs to become legible to agents. A short `AGENTS.md` should act as a table of contents, durable knowledge should live in structured docs, and execution plans should be checked into the repository so agents can operate from files instead of chat memory.
 
-OpenAI's article describes a repo layout with `docs/exec-plans/active/` and `docs/exec-plans/completed/`, and explains that complex work is captured in execution plans with progress and decision logs. This repo packages that pattern into a small cloneable starter.
+Hat tip to OpenAI for the ExecPlans pattern and spec direction. OpenAI's article describes a repo layout with `docs/exec-plans/active/` and `docs/exec-plans/completed/`, and explains that complex work is captured in execution plans with progress and decision logs. This repo packages that pattern into a small cloneable starter.
 
 ### Program
 
@@ -165,7 +165,7 @@ Move the whole Program folder to `docs/programs/completed/` only when:
 - `completed_at` is filled
 - `post_build_recap` is filled
 - `Outcomes & Retrospective` tells the truth
-- `npm run programs:lint` passes
+- `bun run programs:lint` passes
 
 ## The Loop
 
@@ -218,12 +218,15 @@ Then update `AGENTS.md` and `package.json` for your project commands.
 
 ## Markdown And Frontmatter Linting
 
-This starter includes a no-dependency validator:
+This starter uses Bun, Oxlint, Oxfmt, and a no-dependency contract validator:
 
 ```bash
-npm run validate
-npm run programs:lint
-npm run plans:lint
+bun run validate
+bun run programs:lint
+bun run plans:lint
+bun run lint
+bun run format:check
+bun run check
 ```
 
 What it checks:
@@ -238,22 +241,36 @@ What it checks:
 
 The validator lives at [scripts/validate.mjs](./scripts/validate.mjs).
 
-This is intentionally not a full prose linter. For editor feedback, install the recommended VS Code extensions in [.vscode/extensions.json](./.vscode/extensions.json). The workspace also includes:
+`oxlint` checks JavaScript and TypeScript code. In this starter that mainly means `scripts/validate.mjs`, but keeping the command in place makes the copied starter scale naturally when a project adds app code.
+
+`oxfmt` formats supported code and config files. It does not replace Markdown review. The default scripts intentionally target supported files instead of trying to format every Markdown document:
+
+```bash
+bun run format
+bun run format:check
+```
+
+For editor feedback, install the recommended VS Code extensions in [.vscode/extensions.json](./.vscode/extensions.json). The workspace also includes:
 
 - [.markdownlint.json](./.markdownlint.json) for Markdown style rules
+- [.oxlintrc.json](./.oxlintrc.json) for Oxlint configuration
+- [.oxfmtrc.json](./.oxfmtrc.json) for Oxfmt configuration
 - [schemas/program-frontmatter.schema.json](./schemas/program-frontmatter.schema.json) for Program frontmatter
 - [schemas/exec-plan-frontmatter.schema.json](./schemas/exec-plan-frontmatter.schema.json) for ExecPlan frontmatter
 
-VS Code cannot natively validate YAML frontmatter inside Markdown with the same precision as a standalone script, so treat `npm run validate` as the source of truth. The schemas document the required keys and help when copying frontmatter into YAML-aware tools.
+VS Code cannot natively validate YAML frontmatter inside Markdown with the same precision as a standalone script, so treat `bun run validate` as the source of truth. The schemas document the required keys and help when copying frontmatter into YAML-aware tools.
 
 ## Commands
 
-This starter uses zero dependencies.
+This starter has no runtime dependencies. It uses Bun plus two development tools, `oxlint` and `oxfmt`, for the local quality loop.
 
 ```bash
-npm run validate
-npm run programs:lint
-npm run plans:lint
+bun run validate
+bun run programs:lint
+bun run plans:lint
+bun run lint
+bun run format:check
+bun run check
 ```
 
 The validation script checks the required contracts, templates, skill files, and completed seed artifacts.

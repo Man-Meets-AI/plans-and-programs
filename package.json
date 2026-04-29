@@ -2,12 +2,20 @@
   "name": "programs-execplans-starter",
   "version": "0.1.0",
   "private": true,
-  "type": "module",
   "description": "Starter repo for teaching Program, ExecPlan, prompt, and agent skill loops.",
+  "type": "module",
   "scripts": {
-    "validate": "node scripts/validate.mjs",
-    "programs:lint": "node scripts/validate.mjs --programs",
-    "plans:lint": "node scripts/validate.mjs --plans"
-  }
+    "validate": "bun scripts/validate.mjs",
+    "programs:lint": "bun scripts/validate.mjs --programs",
+    "plans:lint": "bun scripts/validate.mjs --plans",
+    "lint": "oxlint . --deny-warnings",
+    "format": "oxfmt scripts/validate.mjs package.json .markdownlint.json .oxlintrc.json .oxfmtrc.json .vscode/settings.json .vscode/extensions.json schemas/program-frontmatter.schema.json schemas/exec-plan-frontmatter.schema.json",
+    "format:check": "oxfmt --check scripts/validate.mjs package.json .markdownlint.json .oxlintrc.json .oxfmtrc.json .vscode/settings.json .vscode/extensions.json schemas/program-frontmatter.schema.json schemas/exec-plan-frontmatter.schema.json",
+    "check": "bun run validate && bun run lint && bun run format:check"
+  },
+  "devDependencies": {
+    "oxfmt": "0.47.0",
+    "oxlint": "1.62.0"
+  },
+  "packageManager": "bun@1.3.5"
 }
-

@@ -10,6 +10,5 @@ It should not teach from private repos or require a runtime service. It should p
 - ExecPlan contract and template
 - prompt assets for writer, griller, execute, validate, and Program refresh
 - shared skill wrappers that point to those prompts
-- a no-dependency validator
+- a no-dependency Bun validator
 - one completed seed Program and child ExecPlan
-

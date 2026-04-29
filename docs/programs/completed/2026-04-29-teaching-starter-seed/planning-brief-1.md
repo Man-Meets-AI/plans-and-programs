@@ -13,5 +13,4 @@ The implementation should:
 - include one completed Program and child ExecPlan
 - include a simple validation command
 
-The work is complete when a learner can clone or fork the repo, read the README, inspect the completed example, copy the templates, and run validation without installing dependencies.
-
+The work is complete when a learner can clone or fork the repo, run `bun install`, read the README, inspect the completed example, copy the templates, and run the validation and quality commands.

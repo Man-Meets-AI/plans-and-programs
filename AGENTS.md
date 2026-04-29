@@ -24,10 +24,11 @@ This repo teaches Program and ExecPlan workflows. Keep changes simple, explicit,
 Run the narrowest relevant command:
 
 ```bash
-npm run validate
-npm run programs:lint
-npm run plans:lint
+bun run validate
+bun run programs:lint
+bun run plans:lint
+bun run lint
+bun run format:check
 ```
 
 If a behavior or contract changes, update the relevant README, template, prompt, and skill wrapper together.
-

@@ -8,7 +8,6 @@ Decision: Include one completed Program and one completed child ExecPlan.
 
 Rationale: Learners need to see what "done" looks like, including frontmatter, progress, validation, and retrospective.
 
-Decision: Use a no-dependency validator.
+Decision: Use a no-dependency Bun validator.
 
 Rationale: Students should be able to run proof immediately after cloning or copying the folders.
-

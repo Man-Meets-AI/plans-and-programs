@@ -21,9 +21,13 @@ If your project already has a `package.json`, copy only the scripts you need:
 ```json
 {
   "scripts": {
-    "validate": "node scripts/validate.mjs",
-    "programs:lint": "node scripts/validate.mjs --programs",
-    "plans:lint": "node scripts/validate.mjs --plans"
+    "validate": "bun scripts/validate.mjs",
+    "programs:lint": "bun scripts/validate.mjs --programs",
+    "plans:lint": "bun scripts/validate.mjs --plans",
+    "lint": "oxlint . --deny-warnings",
+    "format": "oxfmt scripts/validate.mjs package.json .markdownlint.json .oxlintrc.json .oxfmtrc.json .vscode/settings.json .vscode/extensions.json schemas/program-frontmatter.schema.json schemas/exec-plan-frontmatter.schema.json",
+    "format:check": "oxfmt --check scripts/validate.mjs package.json .markdownlint.json .oxlintrc.json .oxfmtrc.json .vscode/settings.json .vscode/extensions.json schemas/program-frontmatter.schema.json schemas/exec-plan-frontmatter.schema.json",
+    "check": "bun run validate && bun run lint && bun run format:check"
   }
 }
 ```
@@ -98,10 +102,12 @@ The starter's validator checks structure that generic Markdown linters do not un
 Run:
 
 ```bash
-npm run validate
+bun run validate
+bun run lint
+bun run format:check
 ```
 
-If you use VS Code, copy `.vscode/`, `.markdownlint.json`, and `schemas/` too.
+If you use VS Code, copy `.vscode/`, `.markdownlint.json`, `.oxlintrc.json`, `.oxfmtrc.json`, and `schemas/` too.
 
 ## Operating Cadence
 

@@ -22,9 +22,8 @@ Harden one ExecPlan until it can be executed without guessing.
 4. Inspect the real repo surfaces it touches.
 5. Tighten scope, out-of-scope boundaries, milestones, validation, recovery, and interfaces.
 6. Do not implement the plan.
-7. Run `npm run plans:lint` or the local equivalent before returning.
+7. Run `bun run plans:lint` or the local equivalent before returning.
 
 ## Prompt Asset
 
 Use `docs/prompts/exec-plan-grill.md` for the copy-paste prompt.
-

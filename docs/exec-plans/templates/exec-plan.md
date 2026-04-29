@@ -70,7 +70,9 @@ Explain what proves the slice works.
 Run these commands from the repo root:
 
 ```bash
-npm run validate
+bun run validate
+bun run lint
+bun run format:check
 ```
 
 ## Idempotence and Recovery
@@ -84,4 +86,3 @@ Keep concise evidence here.
 ## Interfaces and Dependencies
 
 Name commands, files, APIs, or systems this slice depends on.
-
