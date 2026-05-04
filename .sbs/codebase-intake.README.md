@@ -38,6 +38,18 @@ Suppress status output:
 python3 codebase-intake.py --quiet
 ```
 
+Tune worker threads for file intake and passive scans:
+
+```bash
+python3 codebase-intake.py --jobs 12
+```
+
+Print phase timings after generation:
+
+```bash
+python3 codebase-intake.py --benchmark
+```
+
 Run installed external scanners and detected project commands:
 
 ```bash
@@ -124,6 +136,7 @@ Examples:
 
 Deep mode can be slow and may require local dependencies or services. Default mode avoids that by design.
 While each deep command is running, the script keeps command output for the final report and prints periodic status heartbeats so a long test or scanner does not look frozen.
+Independent read-only scanners can run concurrently. Detected project commands such as package scripts and Mix tasks stay serial by default because they often share build caches, services, and generated artifacts.
 
 ## Implementation Notes
 
@@ -131,7 +144,7 @@ The script is Python on purpose. The job is mostly filesystem walking, text pars
 
 Go could be useful later if the scanner needs to be distributed as a single binary, embedded into CI at scale, or parallelized heavily. Right now, Python is the more practical maintenance choice.
 
-The script uses small in-process caches for file text and parsed JSON so repeated risk, architecture, and stack-specific scans do not keep rereading the same files.
+The script builds one path manifest per run, then uses worker threads for text-file intake and passive regex scans. Regex scan groups read each file once per group and check compiled patterns together, which avoids repeated full-repo passes. Small thread-safe in-process caches keep file text and parsed JSON from being reread during stack-specific audits.
 
 ## Future Improvements
 
@@ -148,7 +161,6 @@ Good next improvements:
 - Add Supabase type freshness checks by comparing latest migration timestamp to generated database type files.
 - Add route-to-auth mapping for Next.js and common auth providers.
 - Add migration ordering and destructive-change risk scoring for SQL.
-- Add optional parallel scanning for very large repositories.
 - Add tests for the scanner itself with small fixture repos.
 - Split the script into modules if it becomes a maintained internal tool instead of a copyable single-file utility.
 

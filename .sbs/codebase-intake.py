@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 import datetime as dt
 import json
 import os
@@ -12,11 +14,12 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable, Sequence
+from typing import Callable, Iterable, Iterator, Sequence
 
 
 ROOT = Path.cwd().resolve()
@@ -25,11 +28,15 @@ MAX_STACK_FILE_CHARS = 20_000
 MAX_COMMAND_OUTPUT_CHARS = 40_000
 MAX_SCAN_SAMPLES = 80
 COMMAND_HEARTBEAT_SECONDS = 15
+DEFAULT_JOBS = min(32, (os.cpu_count() or 4) * 4)
 START_TIME = time.monotonic()
 STATUS_ENABLED = True
+WORKER_COUNT = DEFAULT_JOBS
 
 TEXT_CACHE: dict[Path, str] = {}
 JSON_CACHE: dict[Path, object | None] = {}
+TEXT_CACHE_LOCK = threading.Lock()
+JSON_CACHE_LOCK = threading.Lock()
 
 TOOLING_DIR_NAMES = {
     ".cursor",
@@ -419,6 +426,19 @@ class FileInfo:
     top_folder: str
 
 
+@dataclass(frozen=True)
+class PathManifest:
+    scan_paths: tuple[Path, ...]
+    lockfile_inclusive_paths: tuple[Path, ...]
+
+
+@dataclass(frozen=True)
+class CommandSpec:
+    title: str
+    command: tuple[str, ...]
+    cwd: Path
+
+
 @dataclass
 class ScanResult:
     title: str
@@ -426,6 +446,13 @@ class ScanResult:
     by_file: Counter[str]
     samples: list[str]
     truncated: bool
+
+
+@dataclass(frozen=True)
+class ScanPattern:
+    title: str
+    compiled: re.Pattern[str]
+    redact: Callable[[str], str] | None = None
 
 
 @dataclass
@@ -455,6 +482,32 @@ class AuditPackReport:
     recommended_commands: list[str]
 
 
+@dataclass(frozen=True)
+class PhaseTiming:
+    name: str
+    seconds: float
+
+
+class PhaseTimer:
+    def __init__(self, enabled: bool) -> None:
+        self.enabled = enabled
+        self.timings: list[PhaseTiming] = []
+
+    @contextmanager
+    def measure(self, name: str) -> Iterator[None]:
+        if not self.enabled:
+            yield
+            return
+
+        started = time.monotonic()
+        try:
+            yield
+        finally:
+            seconds = time.monotonic() - started
+            self.timings.append(PhaseTiming(name, seconds))
+            status(f"Phase timing: {name} took {seconds:.3f}s")
+
+
 def rel(path: Path) -> str:
     return str(path.relative_to(ROOT)).replace(os.sep, "/")
 
@@ -468,6 +521,13 @@ def status(message: str) -> None:
         return
     elapsed = time.monotonic() - START_TIME
     print(f"[{elapsed:6.1f}s] {message}", file=sys.stderr, flush=True)
+
+
+def bounded_jobs(jobs: int, item_count: int | None = None) -> int:
+    bounded = max(1, jobs)
+    if item_count is not None:
+        return max(1, min(bounded, item_count))
+    return bounded
 
 
 def is_tooling_dir_name(name: str) -> bool:
@@ -553,32 +613,10 @@ def iter_paths(
             yield path
 
 
-def looks_binary(path: Path) -> bool:
-    try:
-        chunk = path.read_bytes()[:4096]
-    except OSError:
-        return True
-
-    if b"\0" in chunk:
-        return True
-
-    try:
-        chunk.decode("utf-8")
-        return False
-    except UnicodeDecodeError:
-        try:
-            chunk.decode("latin-1")
-            return False
-        except UnicodeDecodeError:
-            return True
-
-
-def count_lines(path: Path) -> int:
-    try:
-        with path.open("rb") as file:
-            return sum(1 for _ in file)
-    except OSError:
-        return 0
+def collect_path_manifest(include_tooling: bool) -> PathManifest:
+    lockfile_inclusive_paths = tuple(iter_paths(include_tooling=include_tooling, include_lockfiles=True))
+    scan_paths = tuple(path for path in lockfile_inclusive_paths if not is_excluded_file(path, include_lockfiles=False))
+    return PathManifest(scan_paths=scan_paths, lockfile_inclusive_paths=lockfile_inclusive_paths)
 
 
 def file_type(path: Path) -> str:
@@ -589,38 +627,78 @@ def file_type(path: Path) -> str:
     return "[no extension]"
 
 
-def build_file_infos(include_tooling: bool) -> list[FileInfo]:
-    infos: list[FileInfo] = []
-    for path in iter_paths(include_tooling=include_tooling, include_lockfiles=False):
-        if looks_binary(path):
-            continue
+def text_file_info(path: Path) -> FileInfo | None:
+    try:
+        with path.open("rb") as file:
+            first_chunk = file.read(4096)
+            if b"\0" in first_chunk:
+                return None
 
-        relpath = rel(path)
-        parts = path_parts(relpath)
-        top_folder = parts[0] if len(parts) > 1 else "."
-        infos.append(
-            FileInfo(
-                path=path,
-                relpath=relpath,
-                name=path.name,
-                suffix=path.suffix.lower(),
-                lines=count_lines(path),
-                top_folder=top_folder,
-            )
-        )
-    return infos
+            try:
+                first_chunk.decode("utf-8")
+            except UnicodeDecodeError:
+                first_chunk.decode("latin-1")
+
+            has_bytes = bool(first_chunk)
+            ends_with_newline = first_chunk.endswith(b"\n")
+            lines = first_chunk.count(b"\n")
+            while True:
+                chunk = file.read(1024 * 1024)
+                if not chunk:
+                    break
+                has_bytes = True
+                ends_with_newline = chunk.endswith(b"\n")
+                lines += chunk.count(b"\n")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+    if has_bytes and not ends_with_newline:
+        lines += 1
+
+    relpath = rel(path)
+    parts = path_parts(relpath)
+    top_folder = parts[0] if len(parts) > 1 else "."
+    return FileInfo(
+        path=path,
+        relpath=relpath,
+        name=path.name,
+        suffix=path.suffix.lower(),
+        lines=lines,
+        top_folder=top_folder,
+    )
+
+
+def build_file_infos(paths: Sequence[Path], jobs: int) -> list[FileInfo]:
+    if not paths:
+        return []
+
+    worker_count = bounded_jobs(jobs, len(paths))
+    if worker_count == 1:
+        inspections = [text_file_info(path) for path in paths]
+    else:
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            inspections = list(executor.map(text_file_info, paths))
+
+    return [info for info in inspections if info is not None]
 
 
 def read_text(path: Path, max_chars: int | None = None) -> str:
-    if path not in TEXT_CACHE:
+    with TEXT_CACHE_LOCK:
         try:
-            TEXT_CACHE[path] = path.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            TEXT_CACHE[path] = path.read_text(encoding="latin-1")
-        except OSError as exc:
-            TEXT_CACHE[path] = f"Could not read file: {exc}"
+            text = TEXT_CACHE[path]
+        except KeyError:
+            text = None
 
-    text = TEXT_CACHE[path]
+    if text is None:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            text = path.read_text(encoding="latin-1")
+        except OSError as exc:
+            text = f"Could not read file: {exc}"
+
+        with TEXT_CACHE_LOCK:
+            text = TEXT_CACHE.setdefault(path, text)
 
     if max_chars is not None and len(text) > max_chars:
         return text[:max_chars] + "\n\n...[truncated]"
@@ -809,9 +887,9 @@ def build_tree(include_tooling: bool, max_entries: int = 800) -> str:
     return "\n".join(lines)
 
 
-def find_signal_files(include_tooling: bool) -> list[Path]:
+def find_signal_files(paths: Sequence[Path]) -> list[Path]:
     found: list[Path] = []
-    for path in iter_paths(include_tooling=include_tooling, include_lockfiles=True):
+    for path in paths:
         relpath = rel(path)
         if (
             path.name in STACK_SIGNAL_NAMES
@@ -1082,19 +1160,21 @@ def strip_json_comments(text: str) -> str:
 
 
 def load_json_config(path: Path) -> object | None:
-    if path in JSON_CACHE:
-        return JSON_CACHE[path]
+    with JSON_CACHE_LOCK:
+        if path in JSON_CACHE:
+            return JSON_CACHE[path]
 
     text = read_text(path)
     try:
-        JSON_CACHE[path] = json.loads(text)
+        data = json.loads(text)
     except json.JSONDecodeError:
         try:
-            JSON_CACHE[path] = json.loads(strip_json_comments(text))
+            data = json.loads(strip_json_comments(text))
         except json.JSONDecodeError:
-            JSON_CACHE[path] = None
+            data = None
 
-    return JSON_CACHE[path]
+    with JSON_CACHE_LOCK:
+        return JSON_CACHE.setdefault(path, data)
 
 
 def package_json_paths(signal_files: Sequence[Path]) -> list[Path]:
@@ -1388,31 +1468,89 @@ def scan_regex(
     flags: int = 0,
     redact: Callable[[str], str] | None = None,
     max_samples: int = MAX_SCAN_SAMPLES,
+    jobs: int | None = None,
 ) -> ScanResult:
-    compiled = re.compile(pattern, flags)
-    total = 0
-    by_file: Counter[str] = Counter()
-    samples: list[str] = []
+    return run_scan_patterns(
+        file_infos,
+        [(title, pattern, flags, redact)],
+        max_samples=max_samples,
+        jobs=jobs,
+    )[0]
 
-    for info in file_infos:
-        for line_number, line in iter_text_lines(info.path):
-            if not compiled.search(line):
+
+def scan_file_patterns(
+    info: FileInfo,
+    patterns: Sequence[ScanPattern],
+    max_samples: int,
+) -> list[tuple[int, list[str]]]:
+    counts = [0 for _ in patterns]
+    samples = [[] for _ in patterns]
+
+    for line_number, line in iter_text_lines(info.path):
+        for index, pattern in enumerate(patterns):
+            if not pattern.compiled.search(line):
                 continue
-            total += 1
-            by_file[info.relpath] += 1
-            if len(samples) < max_samples:
-                display = truncate_line(line)
-                if redact is not None:
-                    display = redact(display)
-                samples.append(f"{info.relpath}:{line_number}: {display}")
 
-    return ScanResult(
-        title=title,
-        total=total,
-        by_file=by_file,
-        samples=samples,
-        truncated=total > len(samples),
-    )
+            counts[index] += 1
+            if len(samples[index]) < max_samples:
+                display = truncate_line(line)
+                if pattern.redact is not None:
+                    display = pattern.redact(display)
+                samples[index].append(f"{info.relpath}:{line_number}: {display}")
+
+    return list(zip(counts, samples))
+
+
+def run_scan_patterns(
+    file_infos: Sequence[FileInfo],
+    pattern_specs: Sequence[tuple[str, str, int, Callable[[str], str] | None]],
+    *,
+    max_samples: int = MAX_SCAN_SAMPLES,
+    jobs: int | None = None,
+) -> list[ScanResult]:
+    patterns = [
+        ScanPattern(title=title, compiled=re.compile(pattern, flags), redact=redact)
+        for title, pattern, flags, redact in pattern_specs
+    ]
+    totals = [0 for _ in patterns]
+    by_file = [Counter() for _ in patterns]
+    samples = [[] for _ in patterns]
+
+    if not patterns:
+        return []
+
+    worker_count = bounded_jobs(WORKER_COUNT if jobs is None else jobs, len(file_infos))
+    if worker_count == 1:
+        file_results = [scan_file_patterns(info, patterns, max_samples) for info in file_infos]
+    else:
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            file_results = list(
+                executor.map(
+                    lambda info: scan_file_patterns(info, patterns, max_samples),
+                    file_infos,
+                )
+            )
+
+    for info, file_result in zip(file_infos, file_results):
+        for index, (count, file_samples) in enumerate(file_result):
+            if count == 0:
+                continue
+            totals[index] += count
+            by_file[index][info.relpath] = count
+            remaining_samples = max_samples - len(samples[index])
+            if remaining_samples > 0:
+                samples[index].extend(file_samples[:remaining_samples])
+
+    return [
+        ScanResult(
+            title=pattern.title,
+            total=totals[index],
+            by_file=by_file[index],
+            samples=samples[index],
+            truncated=totals[index] > len(samples[index]),
+        )
+        for index, pattern in enumerate(patterns)
+    ]
 
 
 def redact_secret_line(line: str) -> str:
@@ -1568,18 +1706,9 @@ def risk_patterns() -> list[tuple[str, str, int, Callable[[str], str] | None]]:
 def run_scan_groups(
     file_infos: Sequence[FileInfo],
     patterns: Sequence[tuple[str, str, int, Callable[[str], str] | None]],
+    jobs: int | None = None,
 ) -> list[ScanResult]:
-    return [
-        scan_regex(title, file_infos, pattern, flags=flags, redact=redact)
-        for title, pattern, flags, redact in patterns
-    ]
-
-
-def run_architecture_scans(file_infos: Sequence[FileInfo]) -> list[ScanResult]:
-    return [
-        scan_regex(title, file_infos, pattern, flags=flags)
-        for title, pattern, flags in architecture_patterns()
-    ]
+    return run_scan_patterns(file_infos, patterns, jobs=jobs)
 
 
 def top_scan_targets(result: ScanResult, limit: int = 3) -> str:
@@ -2530,6 +2659,35 @@ def run_command(
         )
 
 
+def run_command_specs(
+    command_specs: Sequence[CommandSpec],
+    timeout_seconds: int,
+    jobs: int,
+) -> list[CommandResult]:
+    if not command_specs:
+        return []
+
+    worker_count = bounded_jobs(jobs, len(command_specs))
+    if worker_count == 1:
+        return [
+            run_command(command_spec.title, command_spec.command, command_spec.cwd, timeout_seconds)
+            for command_spec in command_specs
+        ]
+
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        return list(
+            executor.map(
+                lambda command_spec: run_command(
+                    command_spec.title,
+                    command_spec.command,
+                    command_spec.cwd,
+                    timeout_seconds,
+                ),
+                command_specs,
+            )
+        )
+
+
 def command_output(output_file) -> str:
     output_file.flush()
     output_file.seek(0)
@@ -2541,23 +2699,45 @@ def command_output(output_file) -> str:
 
 def deep_scanner_results(
     mix_roots: Sequence[Path],
+    signal_files: Sequence[Path],
     timeout_seconds: int,
+    jobs: int,
 ) -> list[CommandResult]:
     results: list[CommandResult] = []
+    independent_command_specs: list[CommandSpec] = []
+    serial_command_specs: list[CommandSpec] = []
 
     if shutil.which("gitleaks"):
-        results.append(run_command("Gitleaks: current directory secret scan", ["gitleaks", "dir", "--redact", "--no-banner", "."], ROOT, timeout_seconds))
+        independent_command_specs.append(
+            CommandSpec(
+                "Gitleaks: current directory secret scan",
+                ("gitleaks", "dir", "--redact", "--no-banner", "."),
+                ROOT,
+            )
+        )
         if (ROOT / ".git").exists():
-            results.append(run_command("Gitleaks: git history secret scan", ["gitleaks", "git", "--redact", "--no-banner", "."], ROOT, timeout_seconds))
+            independent_command_specs.append(
+                CommandSpec(
+                    "Gitleaks: git history secret scan",
+                    ("gitleaks", "git", "--redact", "--no-banner", "."),
+                    ROOT,
+                )
+            )
 
     if shutil.which("osv-scanner"):
-        results.append(run_command("OSV-Scanner: dependency vulnerability scan", ["osv-scanner", "scan", "source", "-r", "."], ROOT, timeout_seconds))
+        independent_command_specs.append(
+            CommandSpec(
+                "OSV-Scanner: dependency vulnerability scan",
+                ("osv-scanner", "scan", "source", "-r", "."),
+                ROOT,
+            )
+        )
 
     if shutil.which("semgrep"):
-        results.append(
-            run_command(
+        independent_command_specs.append(
+            CommandSpec(
                 "Semgrep: static analysis scan",
-                [
+                (
                     "semgrep",
                     "scan",
                     "--config",
@@ -2572,20 +2752,15 @@ def deep_scanner_results(
                     "--exclude",
                     REPORT_NAME,
                     ".",
-                ],
+                ),
                 ROOT,
-                timeout_seconds,
             )
         )
 
     if shutil.which("pip-audit"):
-        requirements = [
-            path
-            for path in iter_paths(include_tooling=False, include_lockfiles=True)
-            if path.name == "requirements.txt"
-        ]
+        requirements = [path for path in signal_files if path.name == "requirements.txt"]
         for path in requirements:
-            results.append(run_command(f"pip-audit: {rel(path)}", ["pip-audit", "-r", str(path)], ROOT, timeout_seconds))
+            independent_command_specs.append(CommandSpec(f"pip-audit: {rel(path)}", ("pip-audit", "-r", str(path)), ROOT))
 
     if shutil.which("mix"):
         for mix_root in mix_roots:
@@ -2599,7 +2774,16 @@ def deep_scanner_results(
                 ("Elixir: mix sobelow", ["mix", "sobelow"]),
             ]
             for title, command in commands:
-                results.append(run_command(f"{title} ({rel(mix_root)})", command, mix_root, timeout_seconds))
+                serial_command_specs.append(CommandSpec(f"{title} ({rel(mix_root)})", tuple(command), mix_root))
+
+    if independent_command_specs:
+        worker_count = bounded_jobs(jobs, len(independent_command_specs))
+        status(f"Running {len(independent_command_specs)} independent deep scanner commands with {worker_count} workers")
+        results.extend(run_command_specs(independent_command_specs, timeout_seconds, worker_count))
+
+    if serial_command_specs:
+        status(f"Running {len(serial_command_specs)} language project commands serially")
+        results.extend(run_command_specs(serial_command_specs, timeout_seconds, 1))
 
     return results
 
@@ -2609,7 +2793,7 @@ def stack_deep_command_results(
     audit_reports: Sequence[AuditPackReport],
     timeout_seconds: int,
 ) -> list[CommandResult]:
-    results: list[CommandResult] = []
+    command_specs: list[CommandSpec] = []
     report_names = {report.name for report in audit_reports}
 
     for package_path, scripts in package_script_lookup(signal_files).items():
@@ -2625,12 +2809,11 @@ def stack_deep_command_results(
 
         for script in selected_scripts:
             command = package_run_command(package_root, script)
-            results.append(
-                run_command(
+            command_specs.append(
+                CommandSpec(
                     f"Package script: {script} ({rel(package_root) if package_root != ROOT else '.'})",
-                    command,
+                    tuple(command),
                     package_root,
-                    timeout_seconds,
                 )
             )
 
@@ -2646,25 +2829,25 @@ def stack_deep_command_results(
         if not supabase_roots and (ROOT / "supabase").exists():
             supabase_roots = [ROOT]
         for supabase_root in supabase_roots:
-            results.append(
-                run_command(
+            command_specs.append(
+                CommandSpec(
                     f"Supabase: db lint ({rel(supabase_root) if supabase_root != ROOT else '.'})",
-                    ["supabase", "db", "lint", "--fail-on", "warning"],
+                    ("supabase", "db", "lint", "--fail-on", "warning"),
                     supabase_root,
-                    timeout_seconds,
                 )
             )
             if (supabase_root / "supabase" / "tests").exists():
-                results.append(
-                    run_command(
+                command_specs.append(
+                    CommandSpec(
                         f"Supabase: test db ({rel(supabase_root) if supabase_root != ROOT else '.'})",
-                        ["supabase", "test", "db"],
+                        ("supabase", "test", "db"),
                         supabase_root,
-                        timeout_seconds,
                     )
                 )
 
-    return results
+    if command_specs:
+        status(f"Running {len(command_specs)} detected project commands serially")
+    return run_command_specs(command_specs, timeout_seconds, 1)
 
 
 def write_command_result(file, result: CommandResult) -> None:
@@ -2689,64 +2872,91 @@ def write_list_or_empty(file, items: Sequence[str], empty: str) -> None:
     file.write("\n")
 
 
-def write_report(args: argparse.Namespace) -> Path:
+def write_report(args: argparse.Namespace) -> tuple[Path, list[PhaseTiming]]:
     report_path = ROOT / REPORT_NAME
-    status(f"Starting codebase intake at {ROOT}")
-    status("Walking files and counting text lines")
-    file_infos = build_file_infos(include_tooling=args.include_tooling)
-    code_infos = [info for info in file_infos if is_code_or_config(info) and not is_documentation(info)]
-    production_infos = [info for info in file_infos if is_production_scan_file(info)]
-    quality_infos = code_infos
+    phase_timer = PhaseTimer(args.benchmark)
+    status(f"Starting codebase intake at {ROOT} with {args.jobs} worker(s)")
+
+    with phase_timer.measure("Collect path manifest"):
+        status("Walking files once and building candidate manifest")
+        manifest = collect_path_manifest(args.include_tooling)
+    status(f"Collected {len(manifest.scan_paths)} scan candidates and {len(manifest.lockfile_inclusive_paths)} metadata candidates")
+
+    with phase_timer.measure("Inspect text files"):
+        status(f"Inspecting candidate files with {bounded_jobs(args.jobs, len(manifest.scan_paths))} worker(s)")
+        file_infos = build_file_infos(manifest.scan_paths, args.jobs)
+        code_infos = [info for info in file_infos if is_code_or_config(info) and not is_documentation(info)]
+        production_infos = [info for info in file_infos if is_production_scan_file(info)]
+        quality_infos = code_infos
     status(f"Counted {len(file_infos)} text files")
 
-    status("Detecting stack, commands, and test surface")
-    signal_files = find_signal_files(include_tooling=args.include_tooling)
-    mix_roots = detect_mix_roots(signal_files)
-    phoenix = has_phoenix(signal_files, file_infos)
-    stack_descriptors = detect_stack_descriptors(signal_files, file_infos)
-    commands = discover_commands(signal_files, phoenix)
-    tests = test_metrics(file_infos, mix_roots)
+    with phase_timer.measure("Detect stack and commands"):
+        status("Detecting stack, commands, and test surface")
+        signal_files = find_signal_files(manifest.lockfile_inclusive_paths)
+        mix_roots = detect_mix_roots(signal_files)
+        phoenix = has_phoenix(signal_files, file_infos)
+        stack_descriptors = detect_stack_descriptors(signal_files, file_infos)
+        commands = discover_commands(signal_files, phoenix)
+        tests = test_metrics(file_infos, mix_roots)
     status(f"Detected stack: {', '.join(stack_descriptors)}")
 
-    status("Computing git churn and hotspot scores")
-    changes = git_recent_changes(code_infos)
-    hotspots = hotspot_rows(code_infos, changes)
-    production_hotspots = hotspot_rows(production_infos, changes)
+    with phase_timer.measure("Compute git churn"):
+        status("Computing git churn and hotspot scores")
+        changes = git_recent_changes(code_infos)
+        hotspots = hotspot_rows(code_infos, changes)
+        production_hotspots = hotspot_rows(production_infos, changes)
 
-    status("Scanning architecture, quality, and passive risk patterns")
-    api_surface = elixir_api_surface(production_infos)
-    architecture_results = run_architecture_scans(production_infos)
-    quality_results = run_scan_groups(quality_infos, quality_patterns())
-    risk_results = run_scan_groups(production_infos, risk_patterns())
-    largest_code = sorted(code_infos, key=lambda info: info.lines, reverse=True)
-    largest_production_code = sorted(production_infos, key=lambda info: info.lines, reverse=True)
-    large_elixir = [
-        info
-        for info in code_infos
-        if info.suffix in {".ex", ".exs"} and info.lines >= 500 and not is_test_file(info)
-    ]
-    status("Running stack-specific passive audit packs")
-    stack_audit_reports = build_stack_audit_reports(signal_files, file_infos, production_infos)
-    inspection_targets = recommended_targets(production_hotspots, largest_production_code, risk_results)
+    with phase_timer.measure("Scan source patterns"):
+        scan_workers = bounded_jobs(args.jobs, max(len(production_infos), len(quality_infos)))
+        status(f"Scanning architecture, quality, and passive risk patterns with {scan_workers} worker(s)")
+        api_surface = elixir_api_surface(production_infos)
+        architecture_pattern_specs = [
+            (title, pattern, flags, None)
+            for title, pattern, flags in architecture_patterns()
+        ]
+        risk_pattern_specs = risk_patterns()
+        production_scan_results = run_scan_patterns(
+            production_infos,
+            [*architecture_pattern_specs, *risk_pattern_specs],
+            jobs=args.jobs,
+        )
+        architecture_results = production_scan_results[: len(architecture_pattern_specs)]
+        risk_results = production_scan_results[len(architecture_pattern_specs):]
+        quality_results = run_scan_groups(quality_infos, quality_patterns(), jobs=args.jobs)
+        largest_code = sorted(code_infos, key=lambda info: info.lines, reverse=True)
+        largest_production_code = sorted(production_infos, key=lambda info: info.lines, reverse=True)
+        large_elixir = [
+            info
+            for info in code_infos
+            if info.suffix in {".ex", ".exs"} and info.lines >= 500 and not is_test_file(info)
+        ]
+
+    with phase_timer.measure("Run stack audit packs"):
+        status("Running stack-specific passive audit packs")
+        stack_audit_reports = build_stack_audit_reports(signal_files, file_infos, production_infos)
+        inspection_targets = recommended_targets(production_hotspots, largest_production_code, risk_results)
+
     scanner_results = []
     if args.deep:
-        status("Running deep scanners and detected project commands")
-        scanner_results = deep_scanner_results(mix_roots, args.command_timeout)
-        scanner_results.extend(stack_deep_command_results(signal_files, stack_audit_reports, args.command_timeout))
+        with phase_timer.measure("Run deep commands"):
+            status("Running deep scanners and detected project commands")
+            scanner_results = deep_scanner_results(mix_roots, signal_files, args.command_timeout, args.jobs)
+            scanner_results.extend(stack_deep_command_results(signal_files, stack_audit_reports, args.command_timeout))
     else:
         status("Skipping deep scanners; pass --deep to run them")
 
-    total_lines = sum(info.lines for info in file_infos)
-    test_ratio = tests["ratio"]
-    repo_shape = describe_repo_shape(stack_descriptors, file_infos, test_ratio)
-    source_main_folders = two_level_folder_rows(tests["source_infos"])[:3]
-    test_main_folders = two_level_folder_rows(tests["test_infos"])[:2]
-    package_files = detect_package_files(signal_files)
-    runtime_files = detect_runtime_files(signal_files)
-    tooling_files = find_tooling_files()
+    with phase_timer.measure("Prepare report data"):
+        total_lines = sum(info.lines for info in file_infos)
+        test_ratio = tests["ratio"]
+        repo_shape = describe_repo_shape(stack_descriptors, file_infos, test_ratio)
+        source_main_folders = two_level_folder_rows(tests["source_infos"])[:3]
+        test_main_folders = two_level_folder_rows(tests["test_infos"])[:2]
+        package_files = detect_package_files(signal_files)
+        runtime_files = detect_runtime_files(signal_files)
+        tooling_files = find_tooling_files()
 
     status(f"Writing report to {report_path}")
-    with report_path.open("w", encoding="utf-8") as file:
+    with phase_timer.measure("Write markdown report"), report_path.open("w", encoding="utf-8") as file:
         file.write("# Codebase Intake Report\n\n")
         file.write(f"Generated: `{dt.datetime.now().isoformat(timespec='seconds')}`\n\n")
         file.write(f"Root: `{ROOT}`\n\n")
@@ -3031,7 +3241,7 @@ def write_report(args: argparse.Namespace) -> Path:
         file.write(f"{len(inspection_targets) + 4}. Run `python3 codebase-intake.py --deep` before production or security-sensitive work.\n")
 
     status("Finished codebase intake")
-    return report_path
+    return report_path, phase_timer.timings
 
 
 def parse_args() -> argparse.Namespace:
@@ -3049,15 +3259,34 @@ def parse_args() -> argparse.Namespace:
         default=300,
         help="Timeout in seconds for each --deep command.",
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=DEFAULT_JOBS,
+        help=f"Worker threads for file intake and passive scans. Default: {DEFAULT_JOBS}.",
+    )
+    parser.add_argument(
+        "--benchmark",
+        action="store_true",
+        help="Print phase timings after the report is generated.",
+    )
+    args = parser.parse_args()
+    if args.jobs < 1:
+        parser.error("--jobs must be at least 1")
+    return args
 
 
 def main() -> int:
-    global STATUS_ENABLED
+    global STATUS_ENABLED, WORKER_COUNT
     args = parse_args()
     STATUS_ENABLED = not args.quiet
-    report_path = write_report(args)
+    WORKER_COUNT = args.jobs
+    report_path, timings = write_report(args)
     print(f"Wrote: {report_path}")
+    if args.benchmark and timings:
+        print("Phase timings:", file=sys.stderr)
+        for timing in timings:
+            print(f"- {timing.name}: {timing.seconds:.3f}s", file=sys.stderr)
     if not args.deep:
         print("Deep scanners skipped. Use --deep to run installed scanners and project checks.")
     return 0
