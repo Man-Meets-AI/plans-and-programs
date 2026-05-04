@@ -65,7 +65,8 @@ Default mode is passive:
 - excludes dependency folders, generated folders, test artifacts, local state folders, lockfiles, scanner files, local env files, and local AI/editor tooling folders
 
 Excluded app-adjacent tooling includes `.cursor` and `.claude`. Those paths are listed separately as tooling config unless `--include-tooling` is passed.
-Generated/local-state exclusions also include paths such as `.codex`, `.sandcastle`, `.ai/current`, `.claude/worktrees`, `playwright-report`, `test-results`, `packages/db/dist`, and `supabase/backups`.
+Generated/local-state exclusions also include common cruft across JS/TS, Python, Ruby/Rails, Elixir, Go, JVM, PHP/Laravel, mobile, data/ML, and local database tooling: caches, build outputs, generated docs, test artifacts, local service data, binary model/checkpoint files, and package/vendor folders.
+Environment example files such as `.env.example`, `.env.sample`, and `.env.template` are kept as source signal; local env files remain excluded.
 
 ## Report Sections
 

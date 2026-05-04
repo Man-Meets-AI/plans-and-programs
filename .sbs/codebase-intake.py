@@ -40,28 +40,62 @@ EXCLUDE_DIR_NAMES = {
     ".git",
     ".hg",
     ".svn",
+    ".bundle",
     ".codex",
+    ".cxx",
+    ".docusaurus",
+    ".eggs",
+    ".expo",
+    ".fetch",
+    ".firebase",
+    ".hypothesis",
+    ".ipynb_checkpoints",
+    ".nitro",
+    ".nuxt",
+    ".nyc_output",
+    ".output",
+    ".parcel-cache",
+    ".pyre",
+    ".pytest_cache",
+    ".pytype",
     ".sandcastle",
+    ".serverless",
+    ".storybook-static",
+    ".swiftpm",
+    ".tmp",
+    ".tox",
+    ".vite",
+    ".webpack",
+    ".yardoc",
     "node_modules",
     "bower_components",
     "jspm_packages",
     ".next",
-    ".nuxt",
     ".svelte-kit",
     ".astro",
-    ".expo",
     "dist",
     "build",
     "out",
     "coverage",
-    ".nyc_output",
     ".cache",
     ".turbo",
-    ".parcel-cache",
-    ".vite",
     ".vercel",
     ".netlify",
+    "captures",
+    "checkpoints",
+    "cover",
+    "doc",
+    "htmlcov",
+    "lightning_logs",
+    "mlruns",
+    "mysql-data",
+    "pgdata",
+    "pip-wheel-metadata",
+    "postgres-data",
     "playwright-report",
+    "pprof",
+    "redis-data",
+    "storybook-static",
     "test-results",
     "venv",
     ".venv",
@@ -70,10 +104,8 @@ EXCLUDE_DIR_NAMES = {
     "virtualenv",
     "site-packages",
     "__pycache__",
-    ".pytest_cache",
     ".mypy_cache",
     ".ruff_cache",
-    ".tox",
     ".nox",
     "vendor",
     "target",
@@ -85,21 +117,72 @@ EXCLUDE_DIR_NAMES = {
     "_build",
     "deps",
     ".elixir_ls",
-    ".serverless",
-    ".webpack",
     "tmp",
     "temp",
     "logs",
     "log",
+    "wandb",
+    "xcuserdata",
     ".idea",
     ".vscode",
+    "__pypackages__",
 }
 
 EXCLUDE_DIR_RELPATHS = {
+    ".angular/cache",
     ".ai/current",
     ".claude/worktrees",
+    ".docker",
+    ".dvc/cache",
+    ".nx/cache",
+    ".nx/workspace-data",
+    ".supabase",
+    ".wrangler/state",
+    "bootstrap/cache",
+    "cypress/downloads",
+    "cypress/screenshots",
+    "cypress/videos",
+    "data/interim",
+    "data/raw",
     "packages/db/dist",
+    "public/assets",
+    "public/packs",
+    "public/packs-test",
+    "storage/framework/cache",
+    "storage/framework/sessions",
+    "storage/framework/views",
+    "storage/logs",
+    "supabase/.branches",
     "supabase/backups",
+}
+
+ENV_EXAMPLE_FILE_NAMES = {
+    ".env.example",
+    ".env.sample",
+    ".env.template",
+}
+
+EXCLUDE_FILE_NAMES = {
+    ".coverage",
+    ".DS_Store",
+    ".eslintcache",
+    "coverage.out",
+    "coverage.xml",
+    "erl_crash.dump",
+    "Thumbs.db",
+}
+
+EXCLUDE_FILE_SUFFIXES = {
+    ".ckpt",
+    ".ear",
+    ".jar",
+    ".pid",
+    ".pt",
+    ".pth",
+    ".safetensors",
+    ".test",
+    ".tsbuildinfo",
+    ".war",
 }
 
 INTAKE_FILE_NAMES = {
@@ -394,6 +477,8 @@ def is_tooling_dir_name(name: str) -> bool:
 def is_excluded_dir(path: Path, include_tooling: bool) -> bool:
     if path.name in EXCLUDE_DIR_NAMES:
         return True
+    if path.name.endswith(".egg-info"):
+        return True
     if is_excluded_dir_relpath(path):
         return True
     if not include_tooling and is_tooling_dir_name(path.name):
@@ -428,11 +513,15 @@ def is_intake_file(path: Path) -> bool:
 def is_excluded_file(path: Path, include_lockfiles: bool) -> bool:
     if is_intake_file(path):
         return True
-    if path.name == ".DS_Store" or path.name == "Thumbs.db":
+    if path.name in EXCLUDE_FILE_NAMES:
         return True
-    if path.name.startswith(".env"):
+    if path.name.startswith(".coverage."):
+        return True
+    if path.name.startswith(".env") and path.name not in ENV_EXAMPLE_FILE_NAMES:
         return True
     if not include_lockfiles and is_lockfile(path):
+        return True
+    if any(path.name.endswith(suffix) for suffix in EXCLUDE_FILE_SUFFIXES):
         return True
     if path.suffix.lower() in BINARY_SUFFIXES:
         return True
