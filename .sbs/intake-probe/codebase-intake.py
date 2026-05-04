@@ -27,11 +27,14 @@ REPORT_NAME = "codebase-shape.md"
 MAX_STACK_FILE_CHARS = 20_000
 MAX_COMMAND_OUTPUT_CHARS = 40_000
 MAX_SCAN_SAMPLES = 80
+MAX_CACHED_TEXT_CHARS = 512_000
+DEFAULT_MAX_SCAN_FILE_BYTES = 2_000_000
 COMMAND_HEARTBEAT_SECONDS = 15
 DEFAULT_JOBS = min(32, (os.cpu_count() or 4) * 4)
 START_TIME = time.monotonic()
 STATUS_ENABLED = True
 WORKER_COUNT = DEFAULT_JOBS
+MAX_SCAN_FILE_BYTES = DEFAULT_MAX_SCAN_FILE_BYTES
 
 TEXT_CACHE: dict[Path, str] = {}
 JSON_CACHE: dict[Path, object | None] = {}
@@ -423,6 +426,7 @@ class FileInfo:
     name: str
     suffix: str
     lines: int
+    bytes: int
     top_folder: str
 
 
@@ -453,6 +457,7 @@ class ScanPattern:
     title: str
     compiled: re.Pattern[str]
     redact: Callable[[str], str] | None = None
+    hints: tuple[str, ...] = ()
 
 
 @dataclass
@@ -629,6 +634,11 @@ def file_type(path: Path) -> str:
 
 def text_file_info(path: Path) -> FileInfo | None:
     try:
+        size = path.stat().st_size
+    except OSError:
+        return None
+
+    try:
         with path.open("rb") as file:
             first_chunk = file.read(4096)
             if b"\0" in first_chunk:
@@ -664,6 +674,7 @@ def text_file_info(path: Path) -> FileInfo | None:
         name=path.name,
         suffix=path.suffix.lower(),
         lines=lines,
+        bytes=size,
         top_folder=top_folder,
     )
 
@@ -682,32 +693,93 @@ def build_file_infos(paths: Sequence[Path], jobs: int) -> list[FileInfo]:
     return [info for info in inspections if info is not None]
 
 
-def read_text(path: Path, max_chars: int | None = None) -> str:
+def read_text_prefix(path: Path, max_chars: int) -> str:
+    """Read only the leading portion of a text file.
+
+    Many stack/config checks need a small prefix, not a full multi-megabyte file.
+    The original implementation read the whole file and truncated after the fact,
+    which made large generated SQL/config files expensive even for quick probes.
+    """
+    if max_chars < 0:
+        max_chars = 0
+
     with TEXT_CACHE_LOCK:
-        try:
-            text = TEXT_CACHE[path]
-        except KeyError:
-            text = None
+        cached = TEXT_CACHE.get(path)
+    if cached is not None:
+        if len(cached) > max_chars:
+            return cached[:max_chars] + "\n\n...[truncated]"
+        return cached
 
-    if text is None:
+    for encoding in ("utf-8", "latin-1"):
         try:
-            text = path.read_text(encoding="utf-8")
+            with path.open("r", encoding=encoding) as file:
+                text = file.read(max_chars + 1)
+            break
         except UnicodeDecodeError:
-            text = path.read_text(encoding="latin-1")
+            continue
         except OSError as exc:
-            text = f"Could not read file: {exc}"
+            return f"Could not read file: {exc}"
+    else:
+        return "Could not read file: unsupported text encoding"
 
+    truncated = len(text) > max_chars
+    if truncated:
+        text = text[:max_chars] + "\n\n...[truncated]"
+    elif len(text) <= MAX_CACHED_TEXT_CHARS:
+        with TEXT_CACHE_LOCK:
+            TEXT_CACHE.setdefault(path, text)
+    return text
+
+
+def read_text(path: Path, max_chars: int | None = None) -> str:
+    if max_chars is not None:
+        return read_text_prefix(path, max_chars)
+
+    with TEXT_CACHE_LOCK:
+        cached = TEXT_CACHE.get(path)
+    if cached is not None:
+        return cached
+
+    try:
+        text = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        text = path.read_text(encoding="latin-1")
+    except OSError as exc:
+        return f"Could not read file: {exc}"
+
+    if len(text) <= MAX_CACHED_TEXT_CHARS:
         with TEXT_CACHE_LOCK:
             text = TEXT_CACHE.setdefault(path, text)
-
-    if max_chars is not None and len(text) > max_chars:
-        return text[:max_chars] + "\n\n...[truncated]"
     return text
 
 
 def iter_text_lines(path: Path) -> Iterable[tuple[int, str]]:
-    for line_number, line in enumerate(read_text(path).splitlines(), 1):
-        yield line_number, line
+    """Yield text lines without forcing every scanned file into memory.
+
+    Small files are cached because stack audit packs often re-read them. Large
+    files are streamed, which keeps passive scans from ballooning memory and
+    avoids the old read-whole-file/split-whole-file path.
+    """
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return
+
+    if size <= MAX_CACHED_TEXT_CHARS:
+        for line_number, line in enumerate(read_text(path).splitlines(), 1):
+            yield line_number, line
+        return
+
+    try:
+        with path.open("rb") as file:
+            for line_number, raw_line in enumerate(file, 1):
+                try:
+                    line = raw_line.decode("utf-8")
+                except UnicodeDecodeError:
+                    line = raw_line.decode("latin-1", errors="replace")
+                yield line_number, line.rstrip("\r\n")
+    except OSError:
+        return
 
 
 def markdown_cell(value: object) -> str:
@@ -778,6 +850,21 @@ def is_test_scan_file(info: FileInfo) -> bool:
     return is_code_or_config(info) and is_test_file(info)
 
 
+def is_scan_size_eligible(info: FileInfo) -> bool:
+    return MAX_SCAN_FILE_BYTES <= 0 or info.bytes <= MAX_SCAN_FILE_BYTES
+
+
+def human_bytes(byte_count: int) -> str:
+    value = float(byte_count)
+    for unit in ["B", "KB", "MB", "GB"]:
+        if value < 1024 or unit == "GB":
+            if unit == "B":
+                return f"{int(value)} {unit}"
+            return f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{byte_count} B"
+
+
 def language_rows(file_infos: Sequence[FileInfo]) -> list[tuple[str, int, int]]:
     by_language: dict[str, list[int]] = defaultdict(lambda: [0, 0])
     for info in file_infos:
@@ -844,47 +931,65 @@ def two_level_folder_rows(file_infos: Sequence[FileInfo]) -> list[tuple[str, int
     ]
 
 
-def build_tree(include_tooling: bool, max_entries: int = 800) -> str:
+def build_tree_from_paths(paths: Sequence[Path], max_entries: int = 800) -> str:
+    """Build a repo tree from the already-collected manifest.
+
+    This avoids a second recursive filesystem traversal. It intentionally shows
+    files that are part of the passive scan set; generated folders and excluded
+    files have already been filtered out by collect_path_manifest().
+    """
+    tree: dict[str, object] = {}
+    for path in paths:
+        parts = path_parts(rel(path))
+        if not parts:
+            continue
+        node = tree
+        for part in parts[:-1]:
+            child = node.setdefault(part, {})
+            if not isinstance(child, dict):
+                child = {}
+                node[part] = child
+            node = child
+        node.setdefault(parts[-1], None)
+
     lines = [ROOT.name + "/"]
     emitted = 0
     truncated = False
 
-    def allowed(child: Path) -> bool:
-        if child.is_symlink():
-            return False
-        if child.is_dir():
-            return not is_excluded_dir(child, include_tooling)
-        return not is_excluded_file(child, include_lockfiles=False)
-
-    def walk_dir(directory: Path, prefix: str = "") -> None:
+    def walk_node(node: dict[str, object], prefix: str = "") -> None:
         nonlocal emitted, truncated
         if emitted >= max_entries:
             truncated = True
             return
 
-        try:
-            entries = [child for child in directory.iterdir() if allowed(child)]
-        except OSError:
-            return
-
-        entries.sort(key=lambda item: (item.is_file(), item.name.lower()))
-        for index, child in enumerate(entries):
+        entries = sorted(
+            node.items(),
+            key=lambda item: (not isinstance(item[1], dict), item[0].lower()),
+        )
+        for index, (name, child) in enumerate(entries):
             if emitted >= max_entries:
                 truncated = True
                 return
 
+            is_dir = isinstance(child, dict)
             is_last = index == len(entries) - 1
             connector = "`-- " if is_last else "|-- "
-            lines.append(prefix + connector + child.name + ("/" if child.is_dir() else ""))
+            lines.append(prefix + connector + name + ("/" if is_dir else ""))
             emitted += 1
 
-            if child.is_dir():
-                walk_dir(child, prefix + ("    " if is_last else "|   "))
+            if is_dir:
+                walk_node(child, prefix + ("    " if is_last else "|   "))
 
-    walk_dir(ROOT)
+    walk_node(tree)
     if truncated:
         lines.append("... tree truncated after %d entries" % max_entries)
     return "\n".join(lines)
+
+
+def build_tree(include_tooling: bool, max_entries: int = 800) -> str:
+    # Compatibility wrapper for callers that still expect the old function.
+    paths = tuple(iter_paths(include_tooling=include_tooling, include_lockfiles=False))
+    return build_tree_from_paths(paths, max_entries=max_entries)
 
 
 def find_signal_files(paths: Sequence[Path]) -> list[Path]:
@@ -913,12 +1018,22 @@ def find_tooling_files() -> list[str]:
         if path.is_dir():
             entries.append(dirname + "/")
             listed_children = 0
-            for child in sorted(path.rglob("*")):
-                if is_under_excluded_dir_relpath(child):
-                    continue
-                if child.is_file() and not child.is_symlink():
+            for dirpath, dirnames, filenames in os.walk(path):
+                current = Path(dirpath)
+                dirnames[:] = [
+                    name
+                    for name in sorted(dirnames)
+                    if not (current / name).is_symlink()
+                    and not is_under_excluded_dir_relpath(current / name)
+                ]
+                for filename in sorted(filenames):
+                    child = current / filename
+                    if child.is_symlink() or is_under_excluded_dir_relpath(child):
+                        continue
                     entries.append(rel(child))
                     listed_children += 1
+                    if listed_children >= 60:
+                        break
                 if listed_children >= 60:
                     break
         elif path.is_file():
@@ -1478,16 +1593,55 @@ def scan_regex(
     )[0]
 
 
+REGEX_HINT_STOPWORDS = {
+    "b", "d", "s", "w", "r", "n", "t", "true", "false", "none",
+    "if", "or", "and", "not", "do", "end", "for", "all", "on", "in",
+}
+
+
+def regex_literal_hints(pattern: str) -> tuple[str, ...]:
+    """Extract cheap lowercase substrings that must often appear before a regex can match.
+
+    This is deliberately conservative: hints are only used as a pre-check for a
+    single pattern, and patterns without useful hints still run normally. The
+    goal is to avoid expensive regex calls on lines that clearly cannot match.
+    """
+    cleaned = re.sub(r"\\[bBsSdDwWrRnNtT]", " ", pattern)
+    words = re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", cleaned)
+    hints = []
+    for word in words:
+        hint = word.lower().strip("_")
+        if len(hint) < 3 or hint in REGEX_HINT_STOPWORDS:
+            continue
+        # Skip common fragments produced by regex ranges/classes rather than source text.
+        if hint in {"a-z", "z0", "utf", "dotall", "multiline", "ignorecase"}:
+            continue
+        hints.append(hint)
+    # Keep order stable and avoid very broad hint lists becoming their own cost.
+    return tuple(list(dict.fromkeys(hints))[:24])
+
+
 def scan_file_patterns(
     info: FileInfo,
     patterns: Sequence[ScanPattern],
     max_samples: int,
+    prefilter: re.Pattern[str] | None = None,
 ) -> list[tuple[int, list[str]]]:
     counts = [0 for _ in patterns]
     samples = [[] for _ in patterns]
 
     for line_number, line in iter_text_lines(info.path):
+        lower_line: str | None = None
+
         for index, pattern in enumerate(patterns):
+            if pattern.hints:
+                if lower_line is None:
+                    lower_line = line.lower()
+                if not any(hint in lower_line for hint in pattern.hints):
+                    continue
+            elif prefilter is not None and not prefilter.search(line):
+                continue
+
             if not pattern.compiled.search(line):
                 continue
 
@@ -1509,9 +1663,15 @@ def run_scan_patterns(
     jobs: int | None = None,
 ) -> list[ScanResult]:
     patterns = [
-        ScanPattern(title=title, compiled=re.compile(pattern, flags), redact=redact)
+        ScanPattern(
+            title=title,
+            compiled=re.compile(pattern, flags),
+            redact=redact,
+            hints=regex_literal_hints(pattern),
+        )
         for title, pattern, flags, redact in pattern_specs
     ]
+    prefilter = None
     totals = [0 for _ in patterns]
     by_file = [Counter() for _ in patterns]
     samples = [[] for _ in patterns]
@@ -1521,12 +1681,12 @@ def run_scan_patterns(
 
     worker_count = bounded_jobs(WORKER_COUNT if jobs is None else jobs, len(file_infos))
     if worker_count == 1:
-        file_results = [scan_file_patterns(info, patterns, max_samples) for info in file_infos]
+        file_results = [scan_file_patterns(info, patterns, max_samples, prefilter) for info in file_infos]
     else:
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
             file_results = list(
                 executor.map(
-                    lambda info: scan_file_patterns(info, patterns, max_samples),
+                    lambda info: scan_file_patterns(info, patterns, max_samples, prefilter),
                     file_infos,
                 )
             )
@@ -2885,10 +3045,20 @@ def write_report(args: argparse.Namespace) -> tuple[Path, list[PhaseTiming]]:
     with phase_timer.measure("Inspect text files"):
         status(f"Inspecting candidate files with {bounded_jobs(args.jobs, len(manifest.scan_paths))} worker(s)")
         file_infos = build_file_infos(manifest.scan_paths, args.jobs)
+        scan_size_skipped_infos = sorted(
+            [info for info in file_infos if not is_scan_size_eligible(info)],
+            key=lambda info: info.bytes,
+            reverse=True,
+        )
+        scan_eligible_infos = [info for info in file_infos if is_scan_size_eligible(info)]
         code_infos = [info for info in file_infos if is_code_or_config(info) and not is_documentation(info)]
-        production_infos = [info for info in file_infos if is_production_scan_file(info)]
-        quality_infos = code_infos
-    status(f"Counted {len(file_infos)} text files")
+        scan_code_infos = [info for info in scan_eligible_infos if is_code_or_config(info) and not is_documentation(info)]
+        production_infos = [info for info in scan_eligible_infos if is_production_scan_file(info)]
+        quality_infos = scan_code_infos
+    if scan_size_skipped_infos:
+        status(f"Counted {len(file_infos)} text files; passive scans will skip {len(scan_size_skipped_infos)} oversized file(s)")
+    else:
+        status(f"Counted {len(file_infos)} text files")
 
     with phase_timer.measure("Detect stack and commands"):
         status("Detecting stack, commands, and test surface")
@@ -2954,6 +3124,11 @@ def write_report(args: argparse.Namespace) -> tuple[Path, list[PhaseTiming]]:
         package_files = detect_package_files(signal_files)
         runtime_files = detect_runtime_files(signal_files)
         tooling_files = find_tooling_files()
+        stack_finding_counts = Counter(
+            finding.severity
+            for report in stack_audit_reports
+            for finding in report.findings
+        )
 
     status(f"Writing report to {report_path}")
     with phase_timer.measure("Write markdown report"), report_path.open("w", encoding="utf-8") as file:
@@ -2964,9 +3139,18 @@ def write_report(args: argparse.Namespace) -> tuple[Path, list[PhaseTiming]]:
         file.write("## Executive Summary\n\n")
         file.write(f"Detected repo shape: {repo_shape}\n\n")
         file.write(f"- Repo size counted: `{len(file_infos)}` text files, `{total_lines}` lines outside ignored folders.\n")
+        if scan_size_skipped_infos:
+            file.write(
+                f"- Passive regex scans skipped `{len(scan_size_skipped_infos)}` oversized text files "
+                f"over `{human_bytes(MAX_SCAN_FILE_BYTES)}`; size and hotspot counts still include them.\n"
+            )
         file.write(f"- Detected stack: `{', '.join(stack_descriptors)}`\n")
         if stack_audit_reports:
             file.write(f"- Stack-specific audit packs: `{', '.join(report.name for report in stack_audit_reports)}`\n")
+        if stack_finding_counts:
+            ordered_severities = [severity for severity in ["High", "Medium", "Info"] if stack_finding_counts[severity]]
+            counts = ", ".join(f"`{severity}` {stack_finding_counts[severity]}" for severity in ordered_severities)
+            file.write(f"- Stack audit findings: {counts}.\n")
         if source_main_folders:
             folders = ", ".join(f"`{folder}` ({lines} lines)" for folder, _, lines in source_main_folders)
             file.write(f"- Primary implementation folders: {folders}\n")
@@ -3098,6 +3282,11 @@ def write_report(args: argparse.Namespace) -> tuple[Path, list[PhaseTiming]]:
         file.write("### Lines by Type\n\n")
         file.write(md_table(type_rows(file_infos), ["Type", "Files", "Lines"], numeric_columns={1, 2}) + "\n\n")
 
+        if scan_size_skipped_infos:
+            file.write("### Oversized Files Skipped by Passive Regex Scans\n\n")
+            rows = [(f"`{info.relpath}`", human_bytes(info.bytes), info.lines) for info in scan_size_skipped_infos[:30]]
+            file.write(md_table(rows, ["File", "Size", "Lines"], numeric_columns={2}) + "\n\n")
+
         file.write("### Lines by Top-Level Folder\n\n")
         file.write(md_table(folder_rows(file_infos), ["Folder", "Files", "Lines"], numeric_columns={1, 2}) + "\n\n")
 
@@ -3105,7 +3294,7 @@ def write_report(args: argparse.Namespace) -> tuple[Path, list[PhaseTiming]]:
         file.write(md_table(two_level_folder_rows(file_infos)[:30], ["Folder", "Files", "Lines"], numeric_columns={1, 2}) + "\n\n")
 
         file.write("### Tree\n\n")
-        file.write(fenced(build_tree(include_tooling=args.include_tooling)) + "\n\n")
+        file.write(fenced(build_tree_from_paths(manifest.scan_paths)) + "\n\n")
 
         file.write("## Hotspots\n\n")
         file.write("### Largest Source / Config Files\n\n")
@@ -3266,6 +3455,15 @@ def parse_args() -> argparse.Namespace:
         help=f"Worker threads for file intake and passive scans. Default: {DEFAULT_JOBS}.",
     )
     parser.add_argument(
+        "--max-scan-file-bytes",
+        type=int,
+        default=DEFAULT_MAX_SCAN_FILE_BYTES,
+        help=(
+            "Skip passive regex scans for individual text files larger than this many bytes. "
+            "Use 0 to scan every text file. Default: 2000000."
+        ),
+    )
+    parser.add_argument(
         "--benchmark",
         action="store_true",
         help="Print phase timings after the report is generated.",
@@ -3273,14 +3471,17 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.jobs < 1:
         parser.error("--jobs must be at least 1")
+    if args.max_scan_file_bytes < 0:
+        parser.error("--max-scan-file-bytes must be 0 or greater")
     return args
 
 
 def main() -> int:
-    global STATUS_ENABLED, WORKER_COUNT
+    global STATUS_ENABLED, WORKER_COUNT, MAX_SCAN_FILE_BYTES
     args = parse_args()
     STATUS_ENABLED = not args.quiet
     WORKER_COUNT = args.jobs
+    MAX_SCAN_FILE_BYTES = args.max_scan_file_bytes
     report_path, timings = write_report(args)
     print(f"Wrote: {report_path}")
     if args.benchmark and timings:
