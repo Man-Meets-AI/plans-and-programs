@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -23,6 +24,7 @@ REPORT_NAME = "codebase-shape.md"
 MAX_STACK_FILE_CHARS = 20_000
 MAX_COMMAND_OUTPUT_CHARS = 40_000
 MAX_SCAN_SAMPLES = 80
+COMMAND_HEARTBEAT_SECONDS = 15
 START_TIME = time.monotonic()
 STATUS_ENABLED = True
 
@@ -2348,38 +2350,53 @@ def run_command(
 ) -> CommandResult:
     display_cwd = rel(cwd) if cwd != ROOT else "."
     status(f"Running: {title} in {display_cwd}")
+    command_start = time.monotonic()
+    deadline = command_start + timeout_seconds
+    last_heartbeat = command_start
+
     try:
-        completed = subprocess.run(
-            list(command),
-            cwd=cwd,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            timeout=timeout_seconds,
-            check=False,
-        )
-        output = completed.stdout or ""
-        if len(output) > MAX_COMMAND_OUTPUT_CHARS:
-            output = output[:MAX_COMMAND_OUTPUT_CHARS] + "\n...[truncated]"
-        return CommandResult(
-            title=title,
-            command=" ".join(command),
-            cwd=display_cwd,
-            returncode=completed.returncode,
-            output=output,
-        )
-    except subprocess.TimeoutExpired as exc:
-        output = exc.stdout or ""
-        if isinstance(output, bytes):
-            output = output.decode("utf-8", errors="replace")
-        return CommandResult(
-            title=title,
-            command=" ".join(command),
-            cwd=display_cwd,
-            returncode=None,
-            output=output[:MAX_COMMAND_OUTPUT_CHARS],
-            timed_out=True,
-        )
+        with tempfile.TemporaryFile(mode="w+t", encoding="utf-8", errors="replace") as output_file:
+            process = subprocess.Popen(
+                list(command),
+                cwd=cwd,
+                stdout=output_file,
+                stderr=subprocess.STDOUT,
+            )
+
+            while process.poll() is None:
+                now = time.monotonic()
+                elapsed = int(now - command_start)
+                if now >= deadline:
+                    process.kill()
+                    process.wait()
+                    output = command_output(output_file)
+                    status(f"Timed out: {title} in {display_cwd} after {elapsed}s")
+                    return CommandResult(
+                        title=title,
+                        command=" ".join(command),
+                        cwd=display_cwd,
+                        returncode=None,
+                        output=output,
+                        timed_out=True,
+                    )
+
+                if now - last_heartbeat >= COMMAND_HEARTBEAT_SECONDS:
+                    remaining = max(0, int(deadline - now))
+                    status(f"Still running: {title} in {display_cwd} ({elapsed}s elapsed, {remaining}s until timeout)")
+                    last_heartbeat = now
+
+                time.sleep(1)
+
+            elapsed = time.monotonic() - command_start
+            output = command_output(output_file)
+            status(f"Finished: {title} in {display_cwd} exit={process.returncode} elapsed={elapsed:.1f}s")
+            return CommandResult(
+                title=title,
+                command=" ".join(command),
+                cwd=display_cwd,
+                returncode=process.returncode,
+                output=output,
+            )
     except OSError as exc:
         return CommandResult(
             title=title,
@@ -2388,6 +2405,15 @@ def run_command(
             returncode=None,
             output=str(exc),
         )
+
+
+def command_output(output_file) -> str:
+    output_file.flush()
+    output_file.seek(0)
+    output = output_file.read() or ""
+    if len(output) > MAX_COMMAND_OUTPUT_CHARS:
+        return output[:MAX_COMMAND_OUTPUT_CHARS] + "\n...[truncated]"
+    return output
 
 
 def deep_scanner_results(

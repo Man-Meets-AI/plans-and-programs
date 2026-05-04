@@ -121,6 +121,7 @@ Examples:
 - `supabase db lint --fail-on warning` when Supabase is detected and the CLI exists
 
 Deep mode can be slow and may require local dependencies or services. Default mode avoids that by design.
+While each deep command is running, the script keeps command output for the final report and prints periodic status heartbeats so a long test or scanner does not look frozen.
 
 ## Implementation Notes
 
