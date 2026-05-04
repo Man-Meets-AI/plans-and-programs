@@ -32,7 +32,6 @@ TEXT_CACHE: dict[Path, str] = {}
 JSON_CACHE: dict[Path, object | None] = {}
 
 TOOLING_DIR_NAMES = {
-    ".codex",
     ".cursor",
     ".claude",
 }
@@ -41,6 +40,8 @@ EXCLUDE_DIR_NAMES = {
     ".git",
     ".hg",
     ".svn",
+    ".codex",
+    ".sandcastle",
     "node_modules",
     "bower_components",
     "jspm_packages",
@@ -60,6 +61,8 @@ EXCLUDE_DIR_NAMES = {
     ".vite",
     ".vercel",
     ".netlify",
+    "playwright-report",
+    "test-results",
     "venv",
     ".venv",
     "env",
@@ -90,6 +93,13 @@ EXCLUDE_DIR_NAMES = {
     "log",
     ".idea",
     ".vscode",
+}
+
+EXCLUDE_DIR_RELPATHS = {
+    ".ai/current",
+    ".claude/worktrees",
+    "packages/db/dist",
+    "supabase/backups",
 }
 
 INTAKE_FILE_NAMES = {
@@ -384,9 +394,27 @@ def is_tooling_dir_name(name: str) -> bool:
 def is_excluded_dir(path: Path, include_tooling: bool) -> bool:
     if path.name in EXCLUDE_DIR_NAMES:
         return True
+    if is_excluded_dir_relpath(path):
+        return True
     if not include_tooling and is_tooling_dir_name(path.name):
         return True
     return False
+
+
+def normalized_relpath(path: Path) -> str:
+    try:
+        return str(path.relative_to(ROOT)).replace(os.sep, "/")
+    except ValueError:
+        return path.name
+
+
+def is_excluded_dir_relpath(path: Path) -> bool:
+    return normalized_relpath(path) in EXCLUDE_DIR_RELPATHS
+
+
+def is_under_excluded_dir_relpath(path: Path) -> bool:
+    relpath = normalized_relpath(path)
+    return any(relpath == excluded or relpath.startswith(f"{excluded}/") for excluded in EXCLUDE_DIR_RELPATHS)
 
 
 def is_lockfile(path: Path) -> bool:
@@ -717,9 +745,15 @@ def find_tooling_files() -> list[str]:
             continue
         if path.is_dir():
             entries.append(dirname + "/")
-            for child in sorted(path.rglob("*"))[:60]:
+            listed_children = 0
+            for child in sorted(path.rglob("*")):
+                if is_under_excluded_dir_relpath(child):
+                    continue
                 if child.is_file() and not child.is_symlink():
                     entries.append(rel(child))
+                    listed_children += 1
+                if listed_children >= 60:
+                    break
         elif path.is_file():
             entries.append(dirname)
 

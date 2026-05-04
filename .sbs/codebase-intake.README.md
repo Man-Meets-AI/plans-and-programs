@@ -62,9 +62,10 @@ Default mode is passive:
 - does not install anything
 - does not run tests
 - does not fetch dependencies
-- excludes dependency folders, generated folders, lockfiles, scanner files, local env files, and local AI/editor tooling folders
+- excludes dependency folders, generated folders, test artifacts, local state folders, lockfiles, scanner files, local env files, and local AI/editor tooling folders
 
-Excluded app-adjacent tooling includes `.codex`, `.cursor`, and `.claude`. Those paths are listed separately as tooling config unless `--include-tooling` is passed.
+Excluded app-adjacent tooling includes `.cursor` and `.claude`. Those paths are listed separately as tooling config unless `--include-tooling` is passed.
+Generated/local-state exclusions also include paths such as `.codex`, `.sandcastle`, `.ai/current`, `.claude/worktrees`, `playwright-report`, `test-results`, `packages/db/dist`, and `supabase/backups`.
 
 ## Report Sections
 

@@ -63,17 +63,7 @@ Detected repo shape: Elixir service with Mix, Phoenix web components, Codex app-
 
 ### Agent / Editor Tooling Config
 
-These paths are listed separately and excluded from passive scans unless `--include-tooling` is used.
-
-- `.codex/`
-- `.codex/skills/commit/SKILL.md`
-- `.codex/skills/debug/SKILL.md`
-- `.codex/skills/land/SKILL.md`
-- `.codex/skills/land/land_watch.py`
-- `.codex/skills/linear/SKILL.md`
-- `.codex/skills/pull/SKILL.md`
-- `.codex/skills/push/SKILL.md`
-- `.codex/worktree_init.sh`
+No agent/editor tooling config found.
 
 ## Commands
 
